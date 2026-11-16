@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0d1520" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>GhostTrack Family Locator — Rust + WASM + Android</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/>
+            <circle cx="12" cy="10" r="3"/>
+          </svg>
+        </div>
+        <div>
+          <h1>GhostTrack Family</h1>
+          <small>Family GPS Locator (Opt-In) &amp; OSINT Toolkit — Built with Rust</small>
+        </div>
+      </div>
+
+      <div class="status-pills">
+        <span id="wasm-pill" class="pill"><span class="dot"></span> Memuat Rust WASM...</span>
+        <span id="db-pill" class="pill"><span class="dot"></span> Mengecek Neon DB...</span>
+        <span id="circle-pill" class="pill cyan">Grup: KEL-777</span>
+      </div>
+    </header>
+
+    <nav class="nav-tabs" aria-label="Menu Utama">
+      <button class="tab-btn active" data-tab="family">📍 Peta Keluarga</button>
+      <button class="tab-btn" data-tab="phone">📱 Phone Tracker</button>
+      <button class="tab-btn" data-tab="ip">🌐 IP Tracker</button>
+      <button class="tab-btn" data-tab="osint">🕵️ Username OSINT</button>
+      <button class="tab-btn" data-tab="android">🤖 APK Android &amp; Info</button>
+    </nav>
+
+    <!-- TAB 1: FAMILY GPS -->
+    <section id="tab-family" class="tab-panel active">
+      <div class="consent-banner">
+        <strong>Pelacakan Keluarga Berbasis Izin Resmi (Opt-In):</strong> Lokasi smartphone anggota keluarga hanya dibagikan secara real-time setelah anggota keluarga bergabung dengan Kode Grup + PIN dan mengaktifkan izin GPS pada perangkatnya.
+      </div>
+
+      <div class="grid-2">
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="card">
+            <div class="card-title">
+              <span>🗺️ Peta Lokasi Keluarga Real-Time</span>
+              <div class="btn-row">
+                <button id="btn-refresh-family" class="btn btn-sm">🔄 Refresh</button>
+                <button id="btn-fit-map" class="btn btn-sm btn-cyan">🎯 Fokus Semua</button>
+              </div>
+            </div>
+            <div id="family-map" class="map-box"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>🛡️ Safe Zones (Geofence Rust Haversine)</span>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="sz-name">Nama Zona Aman</label>
+                <input id="sz-name" type="text" placeholder="cth: Rumah / Sekolah" value="Rumah Baru" />
+              </div>
+              <div class="field">
+                <label for="sz-radius">Radius (Meter)</label>
+                <input id="sz-radius" type="number" min="50" max="5000" value="250" />
+              </div>
+            </div>
+            <div class="btn-row" style="margin-bottom:10px;">
+              <button id="btn-add-sz" class="btn btn-sm btn-cyan">➕ Tambah Zona di Posisi Saya / Pusat Peta</button>
+            </div>
+            <div id="safezone-list" class="geofence-tags"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>🧭 Riwayat Rute &amp; Check-In Terakhir</span>
+            </div>
+            <div id="history-list" class="history-list"></div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="card">
+            <div class="card-title">
+              <span>🔐 Circle / Grup Keluarga</span>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="group-code">Kode Grup</label>
+                <input id="group-code" type="text" value="KEL-777" placeholder="KEL-777" />
+              </div>
+              <div class="field">
+                <label for="group-pin">PIN Grup</label>
+                <input id="group-pin" type="password" value="1234" placeholder="1234" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="family-name-input">Nama Keluarga (saat buat grup baru)</label>
+                <input id="family-name-input" type="text" placeholder="Keluarga Harmoni" />
+              </div>
+            </div>
+            <div class="btn-row">
+              <button id="btn-load-group" class="btn btn-primary">📂 Muat Grup</button>
+              <button id="btn-create-group" class="btn">✨ Buat Grup Baru</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>📡 Bagikan GPS HP Ini (Opt-In)</span>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="my-name">Nama Anda</label>
+                <input id="my-name" type="text" placeholder="cth: Ibu / Andi" value="HP Saya" />
+              </div>
+              <div class="field">
+                <label for="my-phone">Nomor HP Anda</label>
+                <input id="my-phone" type="tel" placeholder="0812..." value="+6281200001111" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="my-role">Peran</label>
+                <select id="my-role">
+                  <option value="Orang Tua">Orang Tua</option>
+                  <option value="Anak">Anak</option>
+                  <option value="Keluarga">Keluarga</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="my-status">Status Aktivitas</label>
+                <select id="my-status">
+                  <option value="Aktif">Aktif</option>
+                  <option value="Di Rumah">Di Rumah</option>
+                  <option value="Di Sekolah/Kampus">Di Sekolah/Kampus</option>
+                  <option value="Di Kantor">Di Kantor</option>
+                  <option value="Dalam Perjalanan">Dalam Perjalanan</option>
+                </select>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button id="btn-toggle-gps" class="btn btn-primary">🛰️ Mulai Bagikan GPS Real-Time</button>
+              <button id="btn-checkin-once" class="btn btn-cyan">📍 Check-In Sekali</button>
+              <button id="btn-sos" class="btn btn-danger">🚨 SOS DARURAT</button>
+            </div>
+            <p id="gps-live-info" class="subtext" style="margin-top:8px;margin-bottom:0;">Status GPS perangkat: Belum aktif.</p>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span id="members-header">👨‍👩‍👧‍👦 Anggota Keluarga</span>
+            </div>
+            <div id="member-list" class="member-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: PHONE TRACKER -->
+    <section id="tab-phone" class="tab-panel">
+      <div class="card">
+        <div class="card-title">
+          <span>📱 GhostTrack Phone Number Intelligence (Rust WASM + Family DB)</span>
+        </div>
+        <p class="subtext">
+          Mendeteksi negara, operator seluler Indonesia (Telkomsel, By.U, Indosat, XL, AXIS, Tri, Smartfren), kode wilayah fixed-line, zona waktu, format E.164, dan otomatis mencocokkan jika nomor terdaftar di Circle Keluarga.
+        </p>
+        <div class="form-row">
+          <div class="field">
+            <label for="phone-input">Nomor Telepon Target (+62 / 08xx / Internasional)</label>
+            <input id="phone-input" type="tel" value="081234567890" placeholder="cth: 081234567890 atau +6591234567" />
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="btn-scan-phone" class="btn btn-primary">🔍 Analisis Nomor Telepon</button>
+          <button class="btn btn-sm" data-quick-phone="+6281234567890">Coba: Ayah (Telkomsel)</button>
+          <button class="btn btn-sm" data-quick-phone="089611223344">Coba: Raka (Tri)</button>
+          <button class="btn btn-sm" data-quick-phone="+6591234567">Coba: +65 Singapura</button>
+        </div>
+        <div id="phone-result"></div>
+      </div>
+    </section>
+
+    <!-- TAB 3: IP TRACKER -->
+    <section id="tab-ip" class="tab-panel">
+      <div class="card">
+        <div class="card-title">
+          <span>🌐 GhostTrack IP Geolocation &amp; ISP Tracker</span>
+        </div>
+        <p class="subtext">
+          Melacak lokasi perkiraan jaringan IP publik, ISP, ASN, koordinat latitude/longitude, dan zona waktu menggunakan engine <code>ipwho.is</code> (referensi GhostTrack). Kosongkan input untuk melacak IP koneksi Anda saat ini.
+        </p>
+        <div class="form-row">
+          <div class="field">
+            <label for="ip-input">Alamat IPv4 / IPv6 (Opsional)</label>
+            <input id="ip-input" type="text" placeholder="Kosongkan untuk IP Anda, atau masukkan cth: 8.8.8.8" />
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="btn-scan-ip" class="btn btn-primary">🌐 Lacak IP Target</button>
+          <button id="btn-my-ip" class="btn btn-cyan">📍 Cek IP Saya Sekarang</button>
+        </div>
+        <div id="ip-result" style="margin-top:12px;"></div>
+        <div id="ip-map" class="map-box map-box-sm" style="margin-top:12px;display:none;"></div>
+      </div>
+    </section>
+
+    <!-- TAB 4: USERNAME OSINT -->
+    <section id="tab-osint" class="tab-panel">
+      <div class="card">
+        <div class="card-title">
+          <span>🕵️ GhostTrack Username OSINT Matrix (22 Platform)</span>
+        </div>
+        <p class="subtext">
+          Mengecek keberadaan username publik di 22 platform sosial media (GitHub, Instagram, TikTok, X, Telegram, YouTube, Reddit, dll.) menggunakan daftar target dari <strong>Rust WASM</strong> + pengecekan paralel serverless.
+        </p>
+        <div class="form-row">
+          <div class="field">
+            <label for="osint-input">Username Target</label>
+            <input id="osint-input" type="text" placeholder="cth: hunxbyts" value="hunxbyts" />
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="btn-scan-osint" class="btn btn-primary">🔎 Scan 22 Platform Sosial Media</button>
+        </div>
+        <div id="osint-result"></div>
+      </div>
+    </section>
+
+    <!-- TAB 5: ANDROID APK & INFO -->
+    <section id="tab-android" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">
+            <span>📲 Install di Smartphone Android (PWA &amp; APK Native)</span>
+          </div>
+          <p class="subtext">
+            Aplikasi ini mendukung dua cara instalasi di Android anggota keluarga: langsung sebagai <strong>PWA</strong> dari Chrome Android (tanpa menunggu build), atau mengunduh file <strong>.apk Tauri v2</strong> hasil compile otomatis GitHub Actions.
+          </p>
+          <div class="btn-row" style="margin-bottom:14px;">
+            <button id="btn-install-pwa" class="btn btn-primary">📲 Install PWA di HP Ini</button>
+            <a class="btn btn-cyan" href="https://github.com/biosphereupstream/ghosttrack-family-rs/actions" target="_blank" rel="noopener">📦 Download APK (GitHub Actions)</a>
+            <a class="btn" href="https://github.com/biosphereupstream/ghosttrack-family-rs" target="_blank" rel="noopener">💻 Source Code GitHub</a>
+          </div>
+          <div class="kv-grid">
+            <div class="kv-box">
+              <small>Core Engine</small>
+              <strong>Rust + WebAssembly (ghosttrack_core.wasm)</strong>
+            </div>
+            <div class="kv-box">
+              <small>Android App Wrapper</small>
+              <strong>Tauri v2 (com.ghosttrack.family)</strong>
+            </div>
+            <div class="kv-box">
+              <small>Serverless API &amp; Hosting</small>
+              <strong>Vercel Free Tier + Rust Axum</strong>
+            </div>
+            <div class="kv-box">
+              <small>Database Cloud</small>
+              <strong>Neon Serverless PostgreSQL</strong>
+            </div>
+            <div class="kv-box">
+              <small>Peta &amp; Geofencing</small>
+              <strong>Leaflet.js + OpenStreetMap + Rust Haversine</strong>
+            </div>
+            <div class="kv-box">
+              <small>Referensi OSINT</small>
+              <strong>github.com/HunxByts/GhostTrack</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            <span>📊 Telemetri Perangkat Ini</span>
+            <button id="btn-refresh-device" class="btn btn-sm">🔄 Cek Ulang</button>
+          </div>
+          <div id="device-telemetry" class="kv-grid"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

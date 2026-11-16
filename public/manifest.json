@@ -1,0 +1,29 @@
+{
+  "name": "GhostTrack Family Locator",
+  "short_name": "GhostTrack",
+  "description": "Aplikasi Pelacak GPS Keluarga (Opt-In) & Utilitas GhostTrack Nomor HP/IP/OSINT berbasis Rust + WebAssembly.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#070b12",
+  "theme_color": "#0d1520",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

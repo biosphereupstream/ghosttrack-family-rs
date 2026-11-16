@@ -1,0 +1,19 @@
+[package]
+name = "ghosttrack-family-app"
+version = "1.0.0"
+description = "GhostTrack Family GPS Locator & OSINT Android/Desktop App (Tauri v2)"
+authors = ["GhostTrack Family"]
+edition = "2021"
+
+[lib]
+name = "ghosttrack_family_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ghosttrack-core = { path = "../crates/ghosttrack-core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
