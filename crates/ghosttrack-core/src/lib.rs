@@ -111,6 +111,19 @@ pub unsafe extern "C" fn wasm_osint_platforms(ptr: *const u8, len: usize) -> *mu
     write_output(json)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn wasm_calculate_route_stats(ptr: *const u8, len: usize) -> *mut u8 {
+    let raw = read_utf8(ptr, len);
+    let json = match serde_json::from_str::<Vec<geo::RoutePointInput>>(raw) {
+        Ok(points) => {
+            let stats = geo::calculate_route_stats(&points);
+            serde_json::to_vec(&stats).unwrap_or_else(|_| b"{}".to_vec())
+        }
+        Err(_) => b"{\"point_count\":0,\"total_distance_m\":0,\"total_distance_km\":0,\"min_battery\":0,\"max_battery\":0}".to_vec(),
+    };
+    write_output(json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +214,32 @@ mod tests {
         assert_eq!(targets.len(), 22);
         assert_eq!(targets[0].site, "GitHub");
         assert_eq!(targets[0].url, "https://www.github.com/anindya_dev");
+    }
+
+    #[test]
+    fn test_route_stats_calculation() {
+        let points = vec![
+            geo::RoutePointInput {
+                lat: -6.175392,
+                lng: 106.827153,
+                battery_pct: Some(90),
+            },
+            geo::RoutePointInput {
+                lat: -6.186486,
+                lng: 106.834091,
+                battery_pct: Some(78),
+            },
+            geo::RoutePointInput {
+                lat: -6.194957,
+                lng: 106.823045,
+                battery_pct: Some(63),
+            },
+        ];
+        let stats = geo::calculate_route_stats(&points);
+        assert_eq!(stats.point_count, 3);
+        assert!(stats.total_distance_m > 2800.0 && stats.total_distance_m < 3200.0);
+        assert!(stats.total_distance_km > 2.8 && stats.total_distance_km < 3.2);
+        assert_eq!(stats.min_battery, 63);
+        assert_eq!(stats.max_battery, 90);
     }
 }

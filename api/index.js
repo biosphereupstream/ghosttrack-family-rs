@@ -80,6 +80,81 @@ function rustOsintTargets(username) {
   return callWasmJson('wasm_osint_platforms', String(username || ''));
 }
 
+function rustRouteStats(points) {
+  return callWasmJson('wasm_calculate_route_stats', JSON.stringify(points || []));
+}
+
+function detectMemberAlerts(prev, next, safeZones) {
+  const alerts = [];
+  if (next.sos_active && !prev?.sos_active) {
+    alerts.push({
+      alert_type: 'sos',
+      message: `🚨 DARURAT SOS: ${next.name} mengaktifkan sinyal SOS! Lokasi: https://maps.google.com/?q=${next.lat},${next.lng}`,
+    });
+  }
+  if (next.battery_pct <= 15 && (!prev || Number(prev.battery_pct) > 15)) {
+    alerts.push({
+      alert_type: 'battery',
+      message: `🪫 Baterai Kritis: HP ${next.name} tersisa ${next.battery_pct}%`,
+    });
+  }
+  if (prev && Array.isArray(safeZones) && safeZones.length > 0) {
+    const prevChecks = rustCheckGeofence(Number(prev.lat), Number(prev.lng), safeZones);
+    const nextChecks = rustCheckGeofence(Number(next.lat), Number(next.lng), safeZones);
+    const prevByZone = new Map(prevChecks.map((z) => [z.zone_name, z.inside]));
+    for (const z of nextChecks) {
+      const wasInside = prevByZone.get(z.zone_name);
+      if (typeof wasInside === 'boolean' && wasInside !== z.inside) {
+        alerts.push({
+          alert_type: z.inside ? 'geofence_enter' : 'geofence_exit',
+          message: `🛡️ Geofence: ${next.name} baru saja ${z.inside ? 'MASUK ke' : 'KELUAR dari'} ${z.zone_name}`,
+        });
+      }
+    }
+  }
+  return alerts;
+}
+
+async function sendTelegramMessage(botToken, chatId, text) {
+  const token = String(botToken || '').trim();
+  const chat = String(chatId || '').trim();
+  if (!token || !chat) return { sent: false, reason: 'missing_credentials' };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(4500),
+      body: JSON.stringify({
+        chat_id: chat,
+        text,
+        disable_web_page_preview: false,
+      }),
+    });
+    const data = await res.json();
+    return { sent: Boolean(data.ok), description: data.description || null };
+  } catch (err) {
+    return { sent: false, description: err.message };
+  }
+}
+
+function enrichMembers(members, safeZones, historyAscending) {
+  const historyByMember = new Map();
+  for (const pt of historyAscending) {
+    if (!historyByMember.has(pt.member_id)) historyByMember.set(pt.member_id, []);
+    historyByMember.get(pt.member_id).push({
+      lat: Number(pt.lat),
+      lng: Number(pt.lng),
+      battery_pct: Number(pt.battery_pct),
+    });
+  }
+
+  return members.map((m) => ({
+    ...m,
+    geofences: rustCheckGeofence(Number(m.lat), Number(m.lng), safeZones),
+    route_stats: rustRouteStats(historyByMember.get(m.member_id) || []),
+  }));
+}
+
 // --- Lazy Neon PostgreSQL Connection ---
 let _sql = null;
 let _schemaReady = false;
@@ -104,6 +179,25 @@ async function ensureSchema(sql) {
       group_code TEXT PRIMARY KEY,
       family_name TEXT NOT NULL,
       pin_hash TEXT NOT NULL,
+      telegram_bot_token TEXT NOT NULL DEFAULT '',
+      telegram_chat_id TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+
+  await sql`ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS telegram_bot_token TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT NOT NULL DEFAULT ''`;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS family_alerts (
+      id BIGSERIAL PRIMARY KEY,
+      group_code TEXT NOT NULL REFERENCES family_groups(group_code) ON DELETE CASCADE,
+      member_id TEXT NOT NULL,
+      member_name TEXT NOT NULL,
+      alert_type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
@@ -202,6 +296,8 @@ function ensureMemDemo() {
     group_code: 'KEL-777',
     family_name: 'Keluarga Nusantara (Demo)',
     pin_hash: hash,
+    telegram_bot_token: '',
+    telegram_chat_id: '',
     created_at: now,
     members: new Map([
       ['ayah', { member_id: 'ayah', name: 'Ayah (Budi)', role: 'Orang Tua', phone: '+6281234567890', avatar: '👨', lat: -6.175392, lng: 106.827153, accuracy_m: 12, speed_kmh: 0, battery_pct: 84, status_label: 'Di Kantor', sos_active: false, consent_granted: true, updated_at: now }],
@@ -216,6 +312,7 @@ function ensureMemDemo() {
       { member_id: 'anak', member_name: 'Raka (Anak)', lat: -6.1982, lng: 106.8211, battery_pct: 68, status_label: 'Berangkat Pulang', recorded_at: now },
       { member_id: 'anak', member_name: 'Raka (Anak)', lat: -6.194957, lng: 106.823045, battery_pct: 63, status_label: 'Pulang Sekolah', recorded_at: now },
     ],
+    alerts: [],
   });
 }
 
@@ -399,7 +496,7 @@ async function fetchNeonGroupPayload(sql, groupCode, pin) {
   await ensureSchema(sql);
   const { normalized_code: code, hash } = rustHashPin(groupCode, pin);
 
-  const groups = await sql`SELECT group_code, family_name, pin_hash, created_at FROM family_groups WHERE group_code = ${code} LIMIT 1`;
+  const groups = await sql`SELECT group_code, family_name, pin_hash, telegram_bot_token, telegram_chat_id, created_at FROM family_groups WHERE group_code = ${code} LIMIT 1`;
   if (groups.length === 0) {
     return { status: 404, body: { ok: false, error: `Grup keluarga "${code}" tidak ditemukan` } };
   }
@@ -407,16 +504,15 @@ async function fetchNeonGroupPayload(sql, groupCode, pin) {
     return { status: 401, body: { ok: false, error: 'PIN grup keluarga salah' } };
   }
 
-  const [members, safeZones, history] = await Promise.all([
+  const [members, safeZones, historyDesc, alerts] = await Promise.all([
     sql`SELECT member_id, name, role, phone, avatar, lat, lng, accuracy_m, speed_kmh, battery_pct, status_label, sos_active, consent_granted, updated_at FROM family_members WHERE group_code = ${code} ORDER BY name ASC`,
     sql`SELECT id, name, lat, lng, radius_m FROM safe_zones WHERE group_code = ${code} ORDER BY name ASC`,
     sql`SELECT member_id, member_name, lat, lng, battery_pct, status_label, recorded_at FROM location_history WHERE group_code = ${code} ORDER BY recorded_at DESC LIMIT 80`,
+    sql`SELECT id, member_id, member_name, alert_type, message, lat, lng, created_at FROM family_alerts WHERE group_code = ${code} ORDER BY created_at DESC LIMIT 30`,
   ]);
 
-  const enrichedMembers = members.map((m) => ({
-    ...m,
-    geofences: rustCheckGeofence(Number(m.lat), Number(m.lng), safeZones),
-  }));
+  const historyAscending = historyDesc.slice().reverse();
+  const enrichedMembers = enrichMembers(members, safeZones, historyAscending);
 
   return {
     status: 200,
@@ -425,10 +521,13 @@ async function fetchNeonGroupPayload(sql, groupCode, pin) {
       storage: 'neon-postgres',
       group_code: groups[0].group_code,
       family_name: groups[0].family_name,
+      telegram_configured: Boolean(groups[0].telegram_bot_token && groups[0].telegram_chat_id),
+      telegram_chat_id: groups[0].telegram_chat_id || '',
       created_at: groups[0].created_at,
       members: enrichedMembers,
       safe_zones: safeZones,
-      history: history.reverse(),
+      history: historyAscending,
+      alerts,
     },
   };
 }
@@ -440,12 +539,9 @@ function fetchMemGroupPayload(groupCode, pin) {
   if (!g) return { status: 404, body: { ok: false, error: `Grup keluarga "${code}" tidak ditemukan` } };
   if (g.pin_hash !== hash) return { status: 401, body: { ok: false, error: 'PIN grup keluarga salah' } };
 
-  const members = Array.from(g.members.values())
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((m) => ({
-      ...m,
-      geofences: rustCheckGeofence(m.lat, m.lng, g.safe_zones),
-    }));
+  const historyAscending = g.history.slice(-80);
+  const sortedMembers = Array.from(g.members.values()).sort((a, b) => a.name.localeCompare(b.name));
+  const members = enrichMembers(sortedMembers, g.safe_zones, historyAscending);
 
   return {
     status: 200,
@@ -454,10 +550,13 @@ function fetchMemGroupPayload(groupCode, pin) {
       storage: 'in-memory-fallback',
       group_code: g.group_code,
       family_name: g.family_name,
+      telegram_configured: Boolean(g.telegram_bot_token && g.telegram_chat_id),
+      telegram_chat_id: g.telegram_chat_id || '',
       created_at: g.created_at,
       members,
       safe_zones: g.safe_zones,
-      history: g.history.slice(-80),
+      history: historyAscending,
+      alerts: (g.alerts || []).slice(0, 30),
     },
   };
 }
@@ -502,22 +601,25 @@ async function handleFamilyPost(req) {
         group_code: code,
         family_name: (body.family_name || 'Keluarga Saya').trim(),
         pin_hash: hash,
+        telegram_bot_token: '',
+        telegram_chat_id: '',
         created_at: new Date().toISOString(),
         members: new Map(),
         safe_zones: [],
         history: [],
+        alerts: [],
       });
       const res = fetchMemGroupPayload(code, pin);
       return jsonResponse(res.body, 201);
     }
-    if (action === 'update_location' || action === 'toggle_sos') {
-      const groupCode = body.group_code || 'KEL-777';
-      const pin = String(body.pin || '1234');
-      const { normalized_code: code, hash } = rustHashPin(groupCode, pin);
-      const g = memGroups.get(code);
-      if (!g) return jsonResponse({ ok: false, error: 'Grup tidak ditemukan' }, 404);
-      if (g.pin_hash !== hash) return jsonResponse({ ok: false, error: 'PIN salah' }, 401);
+    const groupCode = body.group_code || 'KEL-777';
+    const pin = String(body.pin || '1234');
+    const { normalized_code: code, hash } = rustHashPin(groupCode, pin);
+    const g = memGroups.get(code);
+    if (!g) return jsonResponse({ ok: false, error: 'Grup tidak ditemukan' }, 404);
+    if (g.pin_hash !== hash) return jsonResponse({ ok: false, error: 'PIN salah' }, 401);
 
+    if (action === 'update_location' || action === 'toggle_sos') {
       const memberId = String(body.member_id || body.name || 'member-1').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
       const prev = g.members.get(memberId);
       const now = new Date().toISOString();
@@ -538,18 +640,26 @@ async function handleFamilyPost(req) {
         consent_granted: body.consent_granted !== false,
         updated_at: now,
       };
+      const newAlerts = detectMemberAlerts(prev, member, g.safe_zones);
+      for (const a of newAlerts) {
+        g.alerts.unshift({
+          id: Date.now(),
+          member_id: memberId,
+          member_name: member.name,
+          alert_type: a.alert_type,
+          message: a.message,
+          lat: member.lat,
+          lng: member.lng,
+          created_at: now,
+        });
+        await sendTelegramMessage(g.telegram_bot_token, g.telegram_chat_id, a.message);
+      }
       g.members.set(memberId, member);
       g.history.push({ member_id: memberId, member_name: member.name, lat: member.lat, lng: member.lng, battery_pct: member.battery_pct, status_label: member.status_label, recorded_at: now });
       const res = fetchMemGroupPayload(code, pin);
       return jsonResponse(res.body, 200);
     }
     if (action === 'add_safe_zone') {
-      const groupCode = body.group_code || 'KEL-777';
-      const pin = String(body.pin || '1234');
-      const { normalized_code: code, hash } = rustHashPin(groupCode, pin);
-      const g = memGroups.get(code);
-      if (!g) return jsonResponse({ ok: false, error: 'Grup tidak ditemukan' }, 404);
-      if (g.pin_hash !== hash) return jsonResponse({ ok: false, error: 'PIN salah' }, 401);
       g.safe_zones.push({
         id: `sz-${Date.now()}`,
         name: (body.zone_name || 'Zona Aman').trim(),
@@ -559,6 +669,33 @@ async function handleFamilyPost(req) {
       });
       const res = fetchMemGroupPayload(code, pin);
       return jsonResponse(res.body, 200);
+    }
+    if (action === 'delete_safe_zone') {
+      g.safe_zones = g.safe_zones.filter((z) => z.id !== String(body.zone_id || ''));
+      const res = fetchMemGroupPayload(code, pin);
+      return jsonResponse(res.body, 200);
+    }
+    if (action === 'delete_member') {
+      g.members.delete(String(body.member_id || ''));
+      const res = fetchMemGroupPayload(code, pin);
+      return jsonResponse(res.body, 200);
+    }
+    if (action === 'clear_alerts') {
+      g.alerts = [];
+      const res = fetchMemGroupPayload(code, pin);
+      return jsonResponse(res.body, 200);
+    }
+    if (action === 'save_telegram_config') {
+      if (body.telegram_bot_token !== undefined) g.telegram_bot_token = String(body.telegram_bot_token || '').trim();
+      if (body.telegram_chat_id !== undefined) g.telegram_chat_id = String(body.telegram_chat_id || '').trim();
+      let telegramResult = null;
+      if (body.send_test) {
+        const msg = `✅ GhostTrack Family (${g.group_code}): Bot Telegram terhubung!`;
+        telegramResult = await sendTelegramMessage(g.telegram_bot_token, g.telegram_chat_id, msg);
+        g.alerts.unshift({ id: Date.now(), member_id: 'system', member_name: 'Sistem', alert_type: 'telegram_test', message: msg, lat: 0, lng: 0, created_at: new Date().toISOString() });
+      }
+      const res = fetchMemGroupPayload(code, pin);
+      return jsonResponse({ ...res.body, telegram_result: telegramResult }, 200);
     }
     return jsonResponse({ ok: false, error: 'Action tidak didukung' }, 400);
   }
@@ -588,7 +725,7 @@ async function handleFamilyPost(req) {
     const groupCode = body.group_code || '';
     const pin = String(body.pin || '');
     const { normalized_code: code, hash } = rustHashPin(groupCode, pin);
-    const groups = await sql`SELECT group_code, pin_hash FROM family_groups WHERE group_code = ${code} LIMIT 1`;
+    const groups = await sql`SELECT group_code, family_name, pin_hash, telegram_bot_token, telegram_chat_id FROM family_groups WHERE group_code = ${code} LIMIT 1`;
     if (groups.length === 0) {
       return jsonResponse({ ok: false, error: `Grup "${code}" tidak ditemukan` }, 404);
     }
@@ -601,7 +738,10 @@ async function handleFamilyPost(req) {
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9_-]/g, '-');
-      const existing = await sql`SELECT * FROM family_members WHERE group_code = ${code} AND member_id = ${memberId} LIMIT 1`;
+      const [existing, safeZones] = await Promise.all([
+        sql`SELECT * FROM family_members WHERE group_code = ${code} AND member_id = ${memberId} LIMIT 1`,
+        sql`SELECT id, name, lat, lng, radius_m FROM safe_zones WHERE group_code = ${code}`,
+      ]);
       const prev = existing[0] || null;
 
       const name = (body.name || prev?.name || memberId).trim();
@@ -617,6 +757,9 @@ async function handleFamilyPost(req) {
       const sosActive = typeof body.sos_active === 'boolean' ? body.sos_active : Boolean(prev?.sos_active ?? false);
       const statusLabel = body.status_label || (sosActive ? 'SOS DARURAT' : prev?.status_label || 'Aktif');
       const consentGranted = body.consent_granted !== false;
+
+      const nextMember = { name, lat, lng, battery_pct: batteryPct, sos_active: sosActive };
+      const newAlerts = detectMemberAlerts(prev, nextMember, safeZones);
 
       await sql`
         INSERT INTO family_members (group_code, member_id, name, role, phone, avatar, lat, lng, accuracy_m, speed_kmh, battery_pct, status_label, sos_active, consent_granted, updated_at)
@@ -643,6 +786,14 @@ async function handleFamilyPost(req) {
         VALUES (${code}, ${memberId}, ${name}, ${lat}, ${lng}, ${batteryPct}, ${statusLabel})
       `;
 
+      for (const a of newAlerts) {
+        await sql`
+          INSERT INTO family_alerts (group_code, member_id, member_name, alert_type, message, lat, lng)
+          VALUES (${code}, ${memberId}, ${name}, ${a.alert_type}, ${a.message}, ${lat}, ${lng})
+        `;
+        await sendTelegramMessage(groups[0].telegram_bot_token, groups[0].telegram_chat_id, a.message);
+      }
+
       const res = await fetchNeonGroupPayload(sql, code, pin);
       return jsonResponse(res.body, 200);
     }
@@ -668,6 +819,47 @@ async function handleFamilyPost(req) {
       await sql`DELETE FROM safe_zones WHERE id = ${zoneId} AND group_code = ${code}`;
       const res = await fetchNeonGroupPayload(sql, code, pin);
       return jsonResponse(res.body, 200);
+    }
+
+    if (action === 'delete_member') {
+      const memberId = String(body.member_id || '');
+      await sql`DELETE FROM family_members WHERE member_id = ${memberId} AND group_code = ${code}`;
+      const res = await fetchNeonGroupPayload(sql, code, pin);
+      return jsonResponse(res.body, 200);
+    }
+
+    if (action === 'clear_alerts') {
+      await sql`DELETE FROM family_alerts WHERE group_code = ${code}`;
+      const res = await fetchNeonGroupPayload(sql, code, pin);
+      return jsonResponse(res.body, 200);
+    }
+
+    if (action === 'save_telegram_config') {
+      const token = body.telegram_bot_token !== undefined
+        ? String(body.telegram_bot_token || '').trim()
+        : (groups[0].telegram_bot_token || '');
+      const chatId = body.telegram_chat_id !== undefined
+        ? String(body.telegram_chat_id || '').trim()
+        : (groups[0].telegram_chat_id || '');
+
+      await sql`
+        UPDATE family_groups
+        SET telegram_bot_token = ${token}, telegram_chat_id = ${chatId}
+        WHERE group_code = ${code}
+      `;
+
+      let telegramResult = null;
+      if (body.send_test && token && chatId) {
+        const msg = `✅ GhostTrack Family (${groups[0].family_name} / ${code}): Notifikasi Bot Telegram aktif!`;
+        telegramResult = await sendTelegramMessage(token, chatId, msg);
+        await sql`
+          INSERT INTO family_alerts (group_code, member_id, member_name, alert_type, message, lat, lng)
+          VALUES (${code}, 'system', 'Sistem', 'telegram_test', ${msg}, 0, 0)
+        `;
+      }
+
+      const res = await fetchNeonGroupPayload(sql, code, pin);
+      return jsonResponse({ ...res.body, telegram_result: telegramResult }, 200);
     }
 
     return jsonResponse({ ok: false, error: 'Action tidak dikenal' }, 400);

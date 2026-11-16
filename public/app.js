@@ -15,6 +15,9 @@ const state = {
   lastCoords: null,
   currentGroup: null,
   deferredInstallPrompt: null,
+  sirenEnabled: localStorage.getItem('gt_siren') !== 'false',
+  lastAlertId: null,
+  androidBgActive: false,
   memberId: localStorage.getItem('gt_member_id') || `hp-${Math.random().toString(36).slice(2, 7)}`,
 };
 
@@ -90,6 +93,43 @@ function wasmParsePhone(number) {
   return callWasmJson('wasm_parse_phone', String(number || ''));
 }
 
+function wasmRouteStats(points) {
+  return callWasmJson('wasm_calculate_route_stats', JSON.stringify(points || []));
+}
+
+function playSosSiren(alertMsg = '') {
+  if (state.sirenEnabled) {
+    try {
+      if (navigator.vibrate) navigator.vibrate([300, 120, 300, 120, 400]);
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) {
+        const ctx = new Ctx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(760, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1120, ctx.currentTime + 0.25);
+        osc.frequency.exponentialRampToValueAtTime(700, ctx.currentTime + 0.5);
+        gain.gain.setValueAtTime(0.08, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.55);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.56);
+      }
+    } catch {
+      // ignore autoplay audio blocks
+    }
+  }
+  if (alertMsg && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification('🚨 Peringatan GhostTrack Family', { body: alertMsg });
+    } catch {
+      // ignore unsupported notification constructor
+    }
+  }
+}
+
 // --- Health & Storage Badge ---
 async function checkHealth() {
   const pill = document.getElementById('db-pill');
@@ -145,14 +185,51 @@ function getCredentials() {
 }
 
 function restoreSavedFields() {
-  const savedCode = localStorage.getItem('gt_group_code');
-  const savedPin = localStorage.getItem('gt_group_pin');
+  const params = new URLSearchParams(window.location.search);
+  const joinCode = params.get('join');
+  const joinPin = params.get('pin');
+
+  const savedCode = joinCode || localStorage.getItem('gt_group_code');
+  const savedPin = joinPin || localStorage.getItem('gt_group_pin');
   const savedName = localStorage.getItem('gt_my_name');
   const savedPhone = localStorage.getItem('gt_my_phone');
-  if (savedCode) document.getElementById('group-code').value = savedCode;
+  if (savedCode) document.getElementById('group-code').value = savedCode.toUpperCase();
   if (savedPin) document.getElementById('group-pin').value = savedPin;
   if (savedName) document.getElementById('my-name').value = savedName;
   if (savedPhone) document.getElementById('my-phone').value = savedPhone;
+
+  if (joinCode) {
+    localStorage.setItem('gt_group_code', joinCode.toUpperCase());
+    if (joinPin) localStorage.setItem('gt_group_pin', joinPin);
+    setTimeout(() => toast(`Bergabung otomatis ke Circle Keluarga "${joinCode.toUpperCase()}"!`), 350);
+  }
+}
+
+function updateInviteBox() {
+  const { code, pin } = getCredentials();
+  const host = window.location.hostname;
+  const origin =
+    host === 'appassets.androidplatform.net' || host.endsWith('tauri.localhost') || window.location.protocol === 'file:'
+      ? DEFAULT_REMOTE_API
+      : window.location.origin;
+  const inviteUrl = `${origin}/?join=${encodeURIComponent(code)}&pin=${encodeURIComponent(pin)}`;
+
+  const linkInput = document.getElementById('invite-link-input');
+  const qrImg = document.getElementById('invite-qr-img');
+  const waLink = document.getElementById('btn-share-wa');
+
+  if (linkInput) linkInput.value = inviteUrl;
+  if (qrImg) {
+    qrImg.style.display = 'block';
+    qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&margin=6&data=${encodeURIComponent(inviteUrl)}`;
+    qrImg.onerror = () => {
+      qrImg.style.display = 'none';
+    };
+  }
+  if (waLink) {
+    const waText = `Halo! Ayo gabung ke Circle Keluarga GhostTrack (${code}, PIN: ${pin}) supaya kita bisa saling memantau lokasi GPS dengan aman:\n${inviteUrl}`;
+    waLink.href = `https://wa.me/?text=${encodeURIComponent(waText)}`;
+  }
 }
 
 async function getBatteryPct() {
@@ -186,6 +263,7 @@ async function loadFamilyGroup(fitBounds = false) {
 
 function renderFamilyGroup(data, fitBounds = false) {
   initFamilyMap();
+  updateInviteBox();
   const { markers, zones, trails } = state.familyLayers;
   markers.clearLayers();
   zones.clearLayers();
@@ -211,7 +289,19 @@ function renderFamilyGroup(data, fitBounds = false) {
 
     const chip = document.createElement('span');
     chip.className = 'tag inside';
-    chip.textContent = `🛡️ ${z.name} (${Math.round(z.radius_m)}m)`;
+    chip.style.display = 'inline-flex';
+    chip.style.alignItems = 'center';
+    chip.style.gap = '4px';
+    chip.innerHTML = `🛡️ ${esc(z.name)} (${Math.round(z.radius_m)}m)`;
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-xs-del';
+    delBtn.title = 'Hapus Safe Zone';
+    delBtn.textContent = '×';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteSafeZone(z.id, z.name);
+    });
+    chip.appendChild(delBtn);
     szEl.appendChild(chip);
   }
   if ((data.safe_zones || []).length === 0) {
@@ -220,9 +310,17 @@ function renderFamilyGroup(data, fitBounds = false) {
 
   // Trails grouped by member
   const pathsByMember = new Map();
+  const historyPointsByMember = new Map();
   for (const pt of data.history || []) {
     if (!pathsByMember.has(pt.member_id)) pathsByMember.set(pt.member_id, []);
     pathsByMember.get(pt.member_id).push([pt.lat, pt.lng]);
+
+    if (!historyPointsByMember.has(pt.member_id)) historyPointsByMember.set(pt.member_id, []);
+    historyPointsByMember.get(pt.member_id).push({
+      lat: Number(pt.lat),
+      lng: Number(pt.lng),
+      battery_pct: Number(pt.battery_pct),
+    });
   }
   for (const [, coords] of pathsByMember) {
     if (coords.length > 1) {
@@ -233,9 +331,16 @@ function renderFamilyGroup(data, fitBounds = false) {
   // Member markers & cards
   const listEl = document.getElementById('member-list');
   listEl.innerHTML = '';
+  let anySos = false;
 
   for (const m of data.members || []) {
     bounds.push([m.lat, m.lng]);
+    if (m.sos_active) anySos = true;
+
+    const routeStats = m.route_stats || wasmRouteStats(historyPointsByMember.get(m.member_id) || []) || {
+      point_count: 0,
+      total_distance_km: 0,
+    };
 
     const icon = L.divIcon({
       className: 'custom-member-icon',
@@ -249,6 +354,7 @@ function renderFamilyGroup(data, fitBounds = false) {
       `<strong>${esc(m.avatar)} ${esc(m.name)}</strong> (${esc(m.role)})<br/>` +
       `Status: <b>${esc(m.status_label)}</b><br/>` +
       `Baterai: ${m.battery_pct}% | Akurasi: ±${Math.round(m.accuracy_m)}m<br/>` +
+      `Jarak Rute: ${Number(routeStats.total_distance_km || 0).toFixed(2)} km<br/>` +
       `Telp: ${esc(m.phone || '-')}<br/>` +
       `Update: ${esc(timeStr)}<br/>` +
       `<a href="https://maps.google.com/?q=${m.lat},${m.lng}" target="_blank" rel="noopener">Buka Google Maps</a>`,
@@ -273,16 +379,24 @@ function renderFamilyGroup(data, fitBounds = false) {
             <div style="font-size:0.74rem;color:var(--muted);">${esc(m.role)} • ${esc(m.phone || 'No. HP belum diisi')}</div>
           </div>
         </div>
-        <span class="pill ${m.sos_active ? 'danger' : 'ok'}">${esc(m.status_label)}</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span class="pill ${m.sos_active ? 'danger' : 'ok'}">${esc(m.status_label)}</span>
+          <button class="btn-xs-del" data-del-member="${esc(m.member_id)}" title="Hapus Anggota">🗑️</button>
+        </div>
       </div>
       <div class="member-meta">
         <span>🔋 ${m.battery_pct}%</span>
         <span>🎯 ±${Math.round(m.accuracy_m)}m</span>
         <span>🚗 ${Number(m.speed_kmh || 0).toFixed(1)} km/j</span>
+        <span>🛣️ ${Number(routeStats.total_distance_km || 0).toFixed(2)} km (${routeStats.point_count || 0} titik)</span>
         <span>🕒 ${esc(timeStr)}</span>
       </div>
       <div class="geofence-tags">${fencesHtml}</div>
     `;
+    card.querySelector('[data-del-member]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteMember(m.member_id, m.name);
+    });
     card.addEventListener('click', () => {
       state.familyMap.setView([m.lat, m.lng], 16, { animate: true });
       marker.openPopup();
@@ -292,6 +406,48 @@ function renderFamilyGroup(data, fitBounds = false) {
 
   if ((data.members || []).length === 0) {
     listEl.innerHTML = '<p class="subtext">Belum ada anggota di grup ini. Tekan "Check-In Sekali" atau "Mulai Bagikan GPS Real-Time" untuk bergabung.</p>';
+  }
+
+  // Alerts list & Telegram status
+  const alertsEl = document.getElementById('alerts-list');
+  if (alertsEl) {
+    alertsEl.innerHTML = '';
+    const alerts = data.alerts || [];
+    for (const a of alerts) {
+      const t = new Date(a.created_at).toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' });
+      const row = document.createElement('div');
+      row.className = `history-row ${a.alert_type === 'sos' ? 'sos-alert' : ''}`;
+      row.innerHTML = `
+        <span>${esc(a.message)}</span>
+        <span style="color:var(--muted);font-family:var(--mono);white-space:nowrap;">${esc(t)}</span>
+      `;
+      alertsEl.appendChild(row);
+    }
+    if (alerts.length === 0) {
+      alertsEl.innerHTML = '<p class="subtext" style="margin:0;">Belum ada peringatan SOS, Geofence, atau Baterai Kritis.</p>';
+    }
+    const newest = alerts[0];
+    if (newest && newest.id !== state.lastAlertId) {
+      const hadPrevious = state.lastAlertId !== null;
+      state.lastAlertId = newest.id;
+      if (hadPrevious && (newest.alert_type === 'sos' || anySos)) {
+        playSosSiren(newest.message);
+        toast(newest.message, true);
+      }
+    } else if (anySos && state.sirenEnabled) {
+      playSosSiren('');
+    }
+  }
+
+  const tgChatEl = document.getElementById('tg-chat-id');
+  const tgStatEl = document.getElementById('tg-status-text');
+  if (tgChatEl && !tgChatEl.value && data.telegram_chat_id) {
+    tgChatEl.value = data.telegram_chat_id;
+  }
+  if (tgStatEl) {
+    tgStatEl.textContent = data.telegram_configured
+      ? `✅ Bot Telegram keluarga aktif (Chat ID: ${data.telegram_chat_id})`
+      : 'Belum dikonfigurasi. Buat bot gratis via @BotFather di Telegram untuk alert otomatis.';
   }
 
   // History list
@@ -505,6 +661,105 @@ async function addSafeZone() {
   } catch (err) {
     toast(`Error: ${err.message}`, true);
   }
+}
+
+async function postFamilyAction(payload, successMsg = null) {
+  const { code, pin } = getCredentials();
+  try {
+    const res = await fetch(apiUrl('/api/family'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_code: code, pin, ...payload }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      toast(data.error || 'Aksi gagal dijalankan', true);
+      return null;
+    }
+    state.currentGroup = data;
+    renderFamilyGroup(data, false);
+    if (successMsg) toast(successMsg);
+    return data;
+  } catch (err) {
+    toast(`Error: ${err.message}`, true);
+    return null;
+  }
+}
+
+async function deleteSafeZone(zoneId, zoneName) {
+  await postFamilyAction({ action: 'delete_safe_zone', zone_id: zoneId }, `Safe Zone "${zoneName}" dihapus.`);
+}
+
+async function deleteMember(memberId, memberName) {
+  await postFamilyAction({ action: 'delete_member', member_id: memberId }, `Anggota "${memberName}" dihapus dari grup.`);
+}
+
+async function clearAlerts() {
+  await postFamilyAction({ action: 'clear_alerts' }, 'Log peringatan dibersihkan.');
+}
+
+async function saveTelegramConfig() {
+  const token = document.getElementById('tg-token').value.trim();
+  const chatId = document.getElementById('tg-chat-id').value.trim();
+  const data = await postFamilyAction({
+    action: 'save_telegram_config',
+    telegram_bot_token: token,
+    telegram_chat_id: chatId,
+    send_test: Boolean(token && chatId),
+  });
+  if (!data) return;
+  if (data.telegram_result?.sent) {
+    toast('✅ Bot Telegram tersimpan & pesan tes berhasil terkirim!');
+  } else if (data.telegram_result && !data.telegram_result.sent) {
+    toast(`Pengaturan disimpan, namun gagal tes Telegram: ${data.telegram_result.description || 'cek token/chat id'}`, true);
+  } else {
+    toast('Pengaturan Telegram disimpan.');
+  }
+}
+
+async function shareWhatsAppLocation() {
+  let coords = state.lastCoords;
+  if (!coords) {
+    try {
+      const pos = await getBrowserPositionOnce();
+      coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    } catch {
+      const center = state.familyMap ? state.familyMap.getCenter() : { lat: -6.175392, lng: 106.827153 };
+      coords = { lat: center.lat, lng: center.lng };
+    }
+  }
+  const name = document.getElementById('my-name').value.trim() || 'Saya';
+  const status = state.sosActive ? '🚨 DARURAT SOS' : document.getElementById('my-status').value;
+  const { code } = getCredentials();
+  const text = `[GhostTrack Family - ${code}]\n${name} (${status})\nLokasi terkini: https://maps.google.com/?q=${coords.lat},${coords.lng}`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+}
+
+function toggleAndroidForegroundService() {
+  const bridge = window.GhostTrackAndroid;
+  if (!bridge) {
+    toast('Fitur ini aktif otomatis di dalam aplikasi APK Android.', true);
+    return;
+  }
+  const btn = document.getElementById('btn-android-fg');
+  if (state.androidBgActive) {
+    bridge.stopBackgroundSync();
+    state.androidBgActive = false;
+    btn.textContent = '🤖 Aktifkan Background GPS Service (Layar Mati)';
+    btn.classList.remove('btn-danger');
+    toast('Background GPS Service Android dihentikan.');
+    return;
+  }
+  const { code, pin } = getCredentials();
+  const name = document.getElementById('my-name').value.trim() || 'HP Android';
+  const role = document.getElementById('my-role').value;
+  const phone = document.getElementById('my-phone').value.trim();
+  const base = localStorage.getItem('gt_api_base') || window.__GHOSTTRACK_API_BASE__ || DEFAULT_REMOTE_API;
+  bridge.startBackgroundSync(base, code, pin, state.memberId, name, role, phone);
+  state.androidBgActive = true;
+  btn.textContent = '⏹️ Hentikan Background GPS Service';
+  btn.classList.add('btn-danger');
+  toast('Background GPS Service Android aktif (tetap sync saat layar terkunci)!');
 }
 
 // --- GhostTrack Phone Tracker ---
@@ -757,6 +1012,51 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-checkin-once').addEventListener('click', checkInOnce);
   document.getElementById('btn-sos').addEventListener('click', toggleSos);
   document.getElementById('btn-add-sz').addEventListener('click', addSafeZone);
+  document.getElementById('btn-wa-sos').addEventListener('click', shareWhatsAppLocation);
+  document.getElementById('btn-clear-alerts').addEventListener('click', clearAlerts);
+  document.getElementById('btn-save-tg').addEventListener('click', saveTelegramConfig);
+
+  document.getElementById('btn-toggle-invite').addEventListener('click', () => {
+    const box = document.getElementById('invite-box');
+    const willShow = box.style.display === 'none';
+    if (willShow) updateInviteBox();
+    box.style.display = willShow ? 'block' : 'none';
+  });
+
+  document.getElementById('btn-copy-invite').addEventListener('click', async () => {
+    const val = document.getElementById('invite-link-input').value;
+    try {
+      await navigator.clipboard.writeText(val);
+      toast('Link undangan disalin ke clipboard!');
+    } catch {
+      document.getElementById('invite-link-input').select();
+      toast('Tekan Ctrl+C / Tahan untuk menyalin link.');
+    }
+  });
+
+  const sirenBtn = document.getElementById('btn-toggle-siren');
+  const syncSirenBtn = () => {
+    sirenBtn.textContent = state.sirenEnabled ? '🔊 Sirine SOS: ON' : '🔇 Sirine SOS: OFF';
+  };
+  syncSirenBtn();
+  sirenBtn.addEventListener('click', async () => {
+    state.sirenEnabled = !state.sirenEnabled;
+    localStorage.setItem('gt_siren', String(state.sirenEnabled));
+    syncSirenBtn();
+    if (state.sirenEnabled && 'Notification' in window && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch {
+        // ignore
+      }
+    }
+    toast(state.sirenEnabled ? 'Sirine & Notifikasi SOS diaktifkan.' : 'Sirine SOS dimatikan.');
+  });
+
+  if (window.GhostTrackAndroid) {
+    document.getElementById('android-fg-row').style.display = 'flex';
+    document.getElementById('btn-android-fg').addEventListener('click', toggleAndroidForegroundService);
+  }
 
   document.getElementById('btn-scan-phone').addEventListener('click', () => scanPhone());
   document.querySelectorAll('[data-quick-phone]').forEach((btn) => {

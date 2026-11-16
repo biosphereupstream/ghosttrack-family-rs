@@ -114,6 +114,20 @@
             <div class="btn-row">
               <button id="btn-load-group" class="btn btn-primary">📂 Muat Grup</button>
               <button id="btn-create-group" class="btn">✨ Buat Grup Baru</button>
+              <button id="btn-toggle-invite" class="btn btn-cyan">🔗 QR &amp; Link Undangan</button>
+            </div>
+            <div id="invite-box" class="invite-box" style="display:none;margin-top:12px;">
+              <div class="invite-flex">
+                <img id="invite-qr-img" alt="QR Undangan Keluarga" width="132" height="132" style="border-radius:10px;background:#fff;padding:4px;" />
+                <div style="flex:1;min-width:190px;">
+                  <label for="invite-link-input" style="font-size:0.74rem;color:var(--muted);display:block;margin-bottom:4px;">Link Gabung Otomatis (Tanpa Ketik Kode/PIN):</label>
+                  <input id="invite-link-input" type="text" readonly />
+                  <div class="btn-row" style="margin-top:8px;">
+                    <button id="btn-copy-invite" class="btn btn-sm btn-primary">📋 Salin Link</button>
+                    <a id="btn-share-wa" class="btn btn-sm btn-cyan" href="#" target="_blank" rel="noopener">💬 Kirim via WhatsApp</a>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -155,6 +169,10 @@
               <button id="btn-toggle-gps" class="btn btn-primary">🛰️ Mulai Bagikan GPS Real-Time</button>
               <button id="btn-checkin-once" class="btn btn-cyan">📍 Check-In Sekali</button>
               <button id="btn-sos" class="btn btn-danger">🚨 SOS DARURAT</button>
+              <button id="btn-wa-sos" class="btn btn-sm">💬 Share Lokasi WA</button>
+            </div>
+            <div id="android-fg-row" class="btn-row" style="margin-top:8px;display:none;">
+              <button id="btn-android-fg" class="btn btn-sm btn-cyan">🤖 Aktifkan Background GPS Service (Layar Mati)</button>
             </div>
             <p id="gps-live-info" class="subtext" style="margin-top:8px;margin-bottom:0;">Status GPS perangkat: Belum aktif.</p>
           </div>
@@ -164,6 +182,34 @@
               <span id="members-header">👨‍👩‍👧‍👦 Anggota Keluarga</span>
             </div>
             <div id="member-list" class="member-list"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>🔔 Pusat Peringatan &amp; Bot Telegram</span>
+              <div class="btn-row">
+                <button id="btn-toggle-siren" class="btn btn-sm">🔊 Sirine SOS: ON</button>
+                <button id="btn-clear-alerts" class="btn btn-sm">🧹 Bersihkan</button>
+              </div>
+            </div>
+            <div id="alerts-list" class="history-list" style="margin-bottom:10px;"></div>
+            <details>
+              <summary style="cursor:pointer;font-size:0.82rem;color:var(--cyan);font-weight:600;">⚙️ Pengaturan Notifikasi Bot Telegram Keluarga</summary>
+              <div class="form-row" style="margin-top:10px;">
+                <div class="field">
+                  <label for="tg-token">Telegram Bot Token (dari @BotFather)</label>
+                  <input id="tg-token" type="password" placeholder="123456:ABC-DEF..." />
+                </div>
+                <div class="field">
+                  <label for="tg-chat-id">Chat ID / Grup Telegram</label>
+                  <input id="tg-chat-id" type="text" placeholder="-1001234567890" />
+                </div>
+              </div>
+              <div class="btn-row">
+                <button id="btn-save-tg" class="btn btn-sm btn-primary">💾 Simpan &amp; Tes Kirim Telegram</button>
+              </div>
+              <p id="tg-status-text" class="subtext" style="margin-top:6px;margin-bottom:0;"></p>
+            </details>
           </div>
         </div>
       </div>
@@ -252,8 +298,8 @@
           </p>
           <div class="btn-row" style="margin-bottom:14px;">
             <button id="btn-install-pwa" class="btn btn-primary">📲 Install PWA di HP Ini</button>
-            <a class="btn btn-cyan" href="https://github.com/biosphereupstream/ghosttrack-family-rs/actions" target="_blank" rel="noopener">📦 Download APK (GitHub Actions)</a>
-            <a class="btn" href="https://github.com/biosphereupstream/ghosttrack-family-rs" target="_blank" rel="noopener">💻 Source Code GitHub</a>
+            <a class="btn btn-cyan" href="https://github.com/biosphereupstream/ghosttrack-family-rs/releases/latest/download/ghosttrack-family.apk" target="_blank" rel="noopener">📦 Download APK Android (.apk 1-Klik)</a>
+            <a class="btn" href="https://github.com/biosphereupstream/ghosttrack-family-rs/releases" target="_blank" rel="noopener">🏷️ GitHub Releases</a>
           </div>
           <div class="kv-grid">
             <div class="kv-box">

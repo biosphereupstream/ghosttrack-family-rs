@@ -76,3 +76,58 @@ pub fn evaluate_geofences(lat: f64, lng: f64, zones: &[SafeZoneInput]) -> Vec<Sa
         })
         .collect()
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutePointInput {
+    pub lat: f64,
+    pub lng: f64,
+    pub battery_pct: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteStats {
+    pub point_count: usize,
+    pub total_distance_m: f64,
+    pub total_distance_km: f64,
+    pub min_battery: i32,
+    pub max_battery: i32,
+}
+
+/// Sums sequential Haversine distances and tracks battery min/max across ordered route points.
+pub fn calculate_route_stats(points: &[RoutePointInput]) -> RouteStats {
+    if points.is_empty() {
+        return RouteStats {
+            point_count: 0,
+            total_distance_m: 0.0,
+            total_distance_km: 0.0,
+            min_battery: 0,
+            max_battery: 0,
+        };
+    }
+
+    let mut total_m = 0.0;
+    for pair in points.windows(2) {
+        total_m += haversine_m(pair[0].lat, pair[0].lng, pair[1].lat, pair[1].lng);
+    }
+
+    let batteries: Vec<i32> = points.iter().filter_map(|p| p.battery_pct).collect();
+    let (min_bat, max_bat) = if batteries.is_empty() {
+        (0, 0)
+    } else {
+        (
+            *batteries.iter().min().unwrap_or(&0),
+            *batteries.iter().max().unwrap_or(&0),
+        )
+    };
+
+    let rounded_m = (total_m * 100.0).round() / 100.0;
+    let rounded_km = ((total_m / 1000.0) * 1000.0).round() / 1000.0;
+
+    RouteStats {
+        point_count: points.len(),
+        total_distance_m: rounded_m,
+        total_distance_km: rounded_km,
+        min_battery: min_bat,
+        max_battery: max_bat,
+    }
+}
